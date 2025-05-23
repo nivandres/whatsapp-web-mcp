@@ -3,7 +3,10 @@ import { Chat, Contact, Message, MessageMedia as Media } from "whatsapp-web.js";
 import qrcode from "qrcode-terminal";
 
 import { StdioServerTransport } from "@modelcontextprotocol/sdk/server/stdio.js";
-import { McpServer } from "@modelcontextprotocol/sdk/server/mcp.js";
+import {
+  McpServer,
+  ResourceTemplate,
+} from "@modelcontextprotocol/sdk/server/mcp.js";
 import { z } from "zod";
 
 const { Client, LocalAuth, MessageMedia } = wweb;
@@ -13,33 +16,58 @@ const Chats = new Map<string, Chat>();
 const Messages = new Map<string, Message>();
 const Medias = new Map<string, Media>();
 
-if (process.argv.length < 3) {
-  console.error("Error: no provided data path for auth");
-  process.exit(1);
-}
+let status: "ready" | (string & {}) = "";
 
-const dataPath = process.argv.at(-1);
+const isConsole = process.argv.at(-1) === "console";
 
 const client = new Client({
-  authStrategy: new LocalAuth({
-    dataPath,
-  }),
+  authStrategy: new LocalAuth(),
   puppeteer:
     process.platform !== "win32" ? { args: ["--no-sandbox"] } : undefined,
 });
 
 client.on("qr", (qr) => {
-  qrcode.generate(qr, { small: true });
-  console.log({ authed: false, dataPath, qr });
+  if (isConsole) qrcode.generate(qr, { small: true });
+  status = qr;
 });
 client.on("authenticated", () => {
-  console.log({ authed: true, dataPath, ready: false });
+  if (isConsole) console.log(`Session stored`);
 });
 client.on("ready", () => {
-  console.log({ authed: true, dataPath, ready: true });
+  if (isConsole) console.log(`Client is ready`);
+  status = "ready";
+});
+client.on("disconnected", () => {
+  status = "";
+  if (isConsole) console.log(`Session disconnected`);
+  client.initialize();
+});
+
+client.on("message_create", (message) => {
+  Messages.set(message.id._serialized, message);
+});
+client.on("message_edit", (message) => {
+  Messages.set(message.id._serialized, message);
 });
 
 client.initialize();
+
+async function getChat(id: string = "") {
+  const chat = (Chats.get(id) ||
+    client.getChatById(id) ||
+    Contacts.get(id)?.getChat() ||
+    (await client.getContactById(id)).getChat()) as Chat | null;
+  Chats.set(id, chat!);
+  return chat;
+}
+async function getContact(id: string = "") {
+  const contact = (Contacts.get(id) ||
+    client.getContactById(id) ||
+    Chats.get(id)?.getContact() ||
+    (await client.getChatById(id)).getContact()) as Contact | null;
+  Contacts.set(id, contact!);
+  return contact;
+}
 
 const server = new McpServer({ name: "whatsapp-web", version: "1.0.0" });
 
@@ -51,13 +79,24 @@ server.tool(
     content: z.string().describe("Message content"),
     options: z
       .object({
-        quotedMessageId: z.string().describe("Quoted message ID"),
-        mediaId: z.string().describe("Message media ID"),
-        caption: z.string().describe("Image or videos caption for media"),
+        quotedMessageId: z.string().optional().describe("Quoted message ID"),
+        mediaId: z.string().optional().describe("Message media ID"),
+        caption: z
+          .string()
+          .optional()
+          .describe("Image or videos caption for media"),
         mentions: z
           .array(z.string())
+          .optional()
           .describe("User IDs to mention in the message"),
-        sendMediaAsSticker: z.boolean().describe("Send media as a sticker"),
+        sendMediaAsSticker: z
+          .boolean()
+          .optional()
+          .describe("Send media as a sticker"),
+        sendSeen: z
+          .boolean()
+          .optional()
+          .describe("Send seen status. Default is true"),
       })
       .optional(),
   },
@@ -68,11 +107,16 @@ server.tool(
         media: Medias.get(options?.mediaId!),
       });
       Messages.set(message.id._serialized, message);
+
       return {
         content: [
           {
-            type: "text",
-            text: `Message successfully sent\nMessage ID: ${message.id._serialized}`,
+            type: "resource",
+            resource: {
+              uri: `messages://${message.id._serialized}`,
+              text: JSON.stringify(message),
+              mimeType: "application/json",
+            },
           },
         ],
       };
@@ -81,12 +125,46 @@ server.tool(
         content: [
           {
             type: "text",
-            text: `Error sending message: ${error.message}`,
+            text: `Error: ${error.message}`,
           },
         ],
         isError: true,
       };
     }
+  }
+);
+
+server.resource(
+  "message",
+  new ResourceTemplate("messages://{messageId}", {
+    list: undefined,
+  }),
+  async (uri, { messageId }) => {
+    messageId = typeof messageId !== "object" ? [messageId] : messageId;
+    const messages = await Promise.all(messageId.map((id) => Messages.get(id)));
+    return {
+      contents: messages.filter(Boolean).map((message) => ({
+        uri: `messages://${message!.id._serialized}`,
+        text: JSON.stringify(message),
+        mimeType: "application/json",
+      })),
+    };
+  }
+);
+
+server.resource(
+  "contact",
+  new ResourceTemplate("contacts://{contactId}", { list: undefined }),
+  async (uri, { contactId }) => {
+    contactId = typeof contactId !== "object" ? [contactId] : contactId;
+    const contacts = await Promise.all(contactId.map(getContact));
+    return {
+      contents: contacts.filter(Boolean).map((contact) => ({
+        uri: `contacts://${contact!.id._serialized}`,
+        text: JSON.stringify(contact),
+        mimeType: "application/json",
+      })),
+    };
   }
 );
 
@@ -98,29 +176,20 @@ server.tool(
     chatId: z.string().describe("Chat ID").optional(),
   },
   async ({ contactId, chatId }) => {
-    let contact: Contact;
-    if (!contactId) {
-      if (!chatId)
-        return {
-          isError: true,
-          content: [
-            { type: "text", text: "Error: no contactId or chatId provided" },
-          ],
-        };
-      const chat = await client.getChatById(chatId);
-      Chats.set(chat.id._serialized, chat);
-      contact = await chat.getContact();
-    } else contact = await client.getContactById(contactId);
-    Contacts.set(contact.id._serialized, contact);
+    const contact = await getContact(contactId || chatId);
+    if (!contact)
+      return {
+        isError: true,
+        content: [{ type: "text", text: "Contact not found" }],
+      };
     return {
       content: [
         {
           type: "resource",
           resource: {
+            uri: `contacts://${contact.id._serialized}`,
             text: JSON.stringify(contact),
             mimeType: "application/json",
-            blob: null,
-            uri: contact.id._serialized,
           },
         },
       ],
@@ -128,25 +197,52 @@ server.tool(
   }
 );
 
-server.tool("get_contacts", "Get all current contact instances", async () => {
-  const contacts = await client.getContacts();
-  return {
-    content: [
-      contacts.map((contact) => {
-        Contacts.set(contact.id._serialized, contact);
-        return {
+server.tool(
+  "get_contacts",
+  "Get all current contact instances",
+  {
+    limit: z
+      .number()
+      .optional()
+      .describe(
+        "Limit the number of contacts returned. All contacts will be fetched but this is the limit of the response"
+      ),
+    page: z.number().optional(),
+  },
+  async ({ limit = Infinity, page = 1 }) => {
+    const contacts = await client.getContacts();
+    contacts.forEach((contact) =>
+      Contacts.set(contact.id._serialized, contact)
+    );
+    return {
+      content: contacts
+        .slice(limit * (page - 1), limit * page)
+        .map((contact) => ({
           type: "resource",
           resource: {
-            mimeType: "application/json",
+            uri: `contacts://${contact.id._serialized}`,
             text: JSON.stringify(contact),
-            blob: null,
-            uri: contact.id._serialized,
+            mimeType: "application/json",
           },
-        };
-      }),
-    ] as any,
-  };
-});
+        })),
+    };
+  }
+);
+
+server.resource(
+  "chat",
+  new ResourceTemplate("chats://{chatId}", { list: undefined }),
+  async (uri, { chatId }) => {
+    chatId = typeof chatId !== "object" ? [chatId] : chatId;
+    const chats = await Promise.all(chatId.map(getChat));
+    return {
+      contents: chats.filter(Boolean).map((chat) => ({
+        uri: `chats://${chat!.id._serialized}`,
+        text: JSON.stringify(chat),
+      })),
+    };
+  }
+);
 
 server.tool(
   "get_chat",
@@ -156,29 +252,20 @@ server.tool(
     contactId: z.string().describe("Contact ID").optional(),
   },
   async ({ contactId, chatId }) => {
-    let chat: Chat;
-    if (!chatId) {
-      if (!contactId)
-        return {
-          isError: true,
-          content: [
-            { type: "text", text: "Error: no chatId or contactId provided" },
-          ],
-        };
-      const contact = await client.getContactById(contactId);
-      Contacts.set(contact.id._serialized, contact);
-      chat = await contact.getChat();
-    } else chat = await client.getChatById(chatId);
-    Chats.set(chat.id._serialized, chat);
+    const chat = await getChat(chatId || contactId);
+    if (!chat)
+      return {
+        isError: true,
+        content: [{ type: "text", text: "Chat not found" }],
+      };
     return {
       content: [
         {
           type: "resource",
           resource: {
-            mimeType: "application/json",
+            uri: `chats://${chat.id._serialized}`,
             text: JSON.stringify(chat),
-            blob: null,
-            uri: chat.id._serialized,
+            mimeType: "application/json",
           },
         },
       ],
@@ -186,25 +273,67 @@ server.tool(
   }
 );
 
-server.tool("get_chats", "Get all current chat instances", async () => {
-  const chats = await client.getChats();
-  return {
-    content: [
-      chats.map((chat) => {
-        Chats.set(chat.id._serialized, chat);
+server.tool(
+  "get_chats",
+  "Get all current chat instances",
+  {
+    limit: z
+      .number()
+      .optional()
+      .describe(
+        "Limit the number of chats returned. All chats will be fetched but this is the limit of the response"
+      ),
+    page: z.number().optional(),
+  },
+  async ({ limit = Infinity, page = 1 }) => {
+    const chats = await client.getChats();
+    chats.forEach((chat) => Chats.set(chat.id._serialized, chat));
+    return {
+      content: chats.slice(limit * (page - 1), limit * page).map((chat) => ({
+        type: "resource",
+        resource: {
+          uri: `chats://${chat.id._serialized}`,
+          text: JSON.stringify(chat),
+          mimeType: "application/json",
+        },
+      })),
+    };
+  }
+);
+
+server.tool(
+  "search_messages",
+  "Searches for messages",
+  {
+    query: z.string().describe("Search query"),
+    options: z
+      .object({
+        chatId: z.string().optional().describe("Chat ID"),
+        limit: z
+          .number()
+          .optional()
+          .describe("Limit the number of messages returned"),
+        page: z.number().optional(),
+      })
+      .optional(),
+  },
+  async ({ query, options }) => {
+    const messages = await client.searchMessages(query, options);
+    return {
+      content: messages.map((message) => {
+        Messages.set(message.id._serialized, message);
         return {
           type: "resource",
           resource: {
+            uri: `messages://${message.id._serialized}`,
+            text: JSON.stringify(message),
             mimeType: "application/json",
-            text: JSON.stringify(chat),
-            blob: null,
-            uri: chat.id._serialized,
           },
         };
       }),
-    ] as any,
-  };
-});
+    };
+  }
+);
 
 server.tool(
   "fetch_messages",
@@ -218,39 +347,30 @@ server.tool(
       ),
     limit: z
       .number()
-      .max(100)
       .describe(
         "The amount of messages to return. If no limit is specified, the available messages will be returned. Note that the actual number of returned messages may be smaller if there aren't enough messages in the conversation. Set this to Infinity to load all messages."
       ),
   },
   async ({ chatId, fromMe, limit }) => {
-    const chat = Chats.get(chatId);
+    const chat = await getChat(chatId);
     if (!chat)
       return {
         isError: true,
-        content: [
-          {
-            type: "text",
-            text: "Chat not found locally, try to run get_chat first",
-          },
-        ],
+        content: [{ type: "text", text: "Chat not found" }],
       };
     const messages = await chat.fetchMessages({ fromMe, limit });
     return {
-      content: [
-        messages.map((message) => {
-          Messages.set(message.id._serialized, message);
-          return {
-            type: "resource",
-            resource: {
-              mimeType: "application/json",
-              text: JSON.stringify(message),
-              blob: null,
-              uri: message.id._serialized,
-            },
-          };
-        }),
-      ] as any,
+      content: messages.map((message) => {
+        Messages.set(message.id._serialized, message);
+        return {
+          type: "resource",
+          resource: {
+            uri: `messages://${message.id._serialized}`,
+            text: JSON.stringify(message),
+            mimeType: "application/json",
+          },
+        };
+      }),
     };
   }
 );
@@ -262,16 +382,11 @@ server.tool(
     contactId: z.string().describe("Contact ID"),
   },
   async ({ contactId }) => {
-    const contact = Contacts.get(contactId);
+    const contact = await getContact(contactId);
     if (!contact)
       return {
         isError: true,
-        content: [
-          {
-            type: "text",
-            text: "Contact not found locally, try to run get_contact first",
-          },
-        ],
+        content: [{ type: "text", text: "Contact not found" }],
       };
     const about = await contact.getAbout();
     return {
@@ -292,18 +407,7 @@ server.tool(
     contactId: z.string().describe("Contact ID"),
   },
   async ({ contactId }) => {
-    const contact = Contacts.get(contactId);
-    if (!contact)
-      return {
-        isError: true,
-        content: [
-          {
-            type: "text",
-            text: "Contact not found locally, try to run get_contact first",
-          },
-        ],
-      };
-    const commonGroups = await contact.getCommonGroups();
+    const commonGroups = await client.getCommonGroups(contactId);
     return {
       content: commonGroups.map((groupId) => ({
         type: "text",
@@ -320,18 +424,7 @@ server.tool(
     contactId: z.string().describe("Contact ID"),
   },
   async ({ contactId }) => {
-    const contact = Contacts.get(contactId);
-    if (!contact)
-      return {
-        isError: true,
-        content: [
-          {
-            type: "text",
-            text: "Contact not found locally, try to run get_contact first",
-          },
-        ],
-      };
-    const url = await contact.getProfilePicUrl();
+    const url = await client.getProfilePicUrl(contactId);
     return {
       content: [
         {
@@ -399,6 +492,56 @@ server.tool(
   }
 );
 
+server.resource(
+  "media",
+  new ResourceTemplate("media://{mediaId}", {
+    list: undefined,
+  }),
+  async (uri, { mediaId }) => {
+    mediaId = typeof mediaId !== "object" ? [mediaId] : mediaId;
+    const medias = await Promise.all(mediaId.map((id) => Medias.get(id)));
+    return {
+      contents: medias.filter(Boolean).map((media) => ({
+        uri: `media://${media!.filename}`,
+        text: media!.filename,
+        mimeType: media!.mimetype,
+        blob: media!.data,
+      })),
+    };
+  }
+);
+
+server.tool(
+  "download_message_media",
+  {
+    messageId: z.string().describe("Message ID"),
+  },
+  async ({ messageId }) => {
+    const message = Messages.get(messageId);
+    if (!message)
+      return {
+        isError: true,
+        content: [{ type: "text", text: "Message not found" }],
+      };
+    const media = await message.downloadMedia();
+    const id = `${message.id._serialized}/${media.filename}`;
+    Medias.set(id, media);
+    return {
+      content: [
+        {
+          type: "resource",
+          resource: {
+            uri: `media://${id}`,
+            text: media.filename,
+            mimeType: media.mimetype,
+            blob: media.data,
+          },
+        },
+      ],
+    };
+  }
+);
+
 server.tool(
   "create_message_media",
   "Creates a new message media reference for other command references",
@@ -456,8 +599,13 @@ server.tool(
     return {
       content: [
         {
-          type: "text",
-          text: `Media created with ID ${id}`,
+          type: "resource",
+          resource: {
+            uri: `media://${id}`,
+            text: media.filename,
+            mimeType: media.mimetype,
+            blob: media.data,
+          },
         },
       ],
     };
@@ -471,16 +619,11 @@ server.tool(
     chatId: z.string().describe("Chat ID"),
   },
   async ({ chatId }) => {
-    const chat = Chats.get(chatId);
+    const chat = await getChat(chatId);
     if (!chat)
       return {
         isError: true,
-        content: [
-          {
-            type: "text",
-            text: "Chat not found locally, try to run get_chat first",
-          },
-        ],
+        content: [{ type: "text", text: "Chat not found" }],
       };
     await chat.pin();
     return {
@@ -501,16 +644,11 @@ server.tool(
     chatId: z.string().describe("Chat ID"),
   },
   async ({ chatId }) => {
-    const chat = Chats.get(chatId);
+    const chat = await getChat(chatId);
     if (!chat)
       return {
         isError: true,
-        content: [
-          {
-            type: "text",
-            text: "Chat not found locally, try to run get_chat first",
-          },
-        ],
+        content: [{ type: "text", text: "Chat not found" }],
       };
     await chat.unpin();
     return {
@@ -529,21 +667,16 @@ server.tool(
   "Mutes a chat for a specific duration",
   {
     chatId: z.string().describe("Chat ID"),
-    unmuteDate: z.string().describe("Unmute date in ISO format"),
+    unmuteDate: z.string().optional().describe("Unmute date in ISO format"),
   },
   async ({ chatId, unmuteDate }) => {
-    const chat = Chats.get(chatId);
+    const chat = await getChat(chatId);
     if (!chat)
       return {
         isError: true,
-        content: [
-          {
-            type: "text",
-            text: "Chat not found locally, try to run get_chat first",
-          },
-        ],
+        content: [{ type: "text", text: "Chat not found" }],
       };
-    await chat.mute(new Date(unmuteDate));
+    await chat.mute(unmuteDate ? new Date(unmuteDate) : undefined);
     return {
       content: [
         {
@@ -562,16 +695,11 @@ server.tool(
     chatId: z.string().describe("Chat ID"),
   },
   async ({ chatId }) => {
-    const chat = Chats.get(chatId);
+    const chat = await getChat(chatId);
     if (!chat)
       return {
         isError: true,
-        content: [
-          {
-            type: "text",
-            text: "Chat not found locally, try to run get_chat first",
-          },
-        ],
+        content: [{ type: "text", text: "Chat not found" }],
       };
     await chat.unmute();
     return {
@@ -592,16 +720,11 @@ server.tool(
     contactId: z.string().describe("Contact ID"),
   },
   async ({ contactId }) => {
-    const contact = Contacts.get(contactId);
+    const contact = await getContact(contactId);
     if (!contact)
       return {
         isError: true,
-        content: [
-          {
-            type: "text",
-            text: "Contact not found locally, try to run get_contact first",
-          },
-        ],
+        content: [{ type: "text", text: "Contact not found" }],
       };
     await contact.block();
     return {
@@ -622,16 +745,11 @@ server.tool(
     contactId: z.string().describe("Contact ID"),
   },
   async ({ contactId }) => {
-    const contact = Contacts.get(contactId);
+    const contact = await getContact(contactId);
     if (!contact)
       return {
         isError: true,
-        content: [
-          {
-            type: "text",
-            text: "Contact not found locally, try to run get_contact first",
-          },
-        ],
+        content: [{ type: "text", text: "Contact not found" }],
       };
     await contact.unblock();
     return {
@@ -655,10 +773,9 @@ server.tool(
         blockedContacts.map((contact) => ({
           type: "resource",
           resource: {
-            mimeType: "application/json",
+            uri: `contacts://${contact.id._serialized}`,
             text: JSON.stringify(contact),
-            blob: null,
-            uri: contact.id._serialized,
+            mimeType: "application/json",
           },
         })),
       ] as any,
@@ -683,7 +800,7 @@ server.tool(
       content: [
         {
           type: "text",
-          text: url || "No profile picture set",
+          text: url || "No profile picture",
         },
       ],
     };
@@ -721,6 +838,22 @@ server.tool(
 );
 
 server.tool(
+  "delete_profile_picture",
+  "Removes the current user's profile picture",
+  () => {
+    client.deleteProfilePicture();
+    return {
+      content: [
+        {
+          type: "text",
+          text: `Profile picture deleted`,
+        },
+      ],
+    };
+  }
+);
+
+server.tool(
   "set_display_name",
   "Sets the client's display name",
   {
@@ -745,6 +878,23 @@ server.tool("get_info", "Gets the client's information", async () => {
       {
         type: "text",
         text: JSON.stringify(client.info),
+      },
+    ],
+  };
+});
+
+server.tool("client_status", "Get client session status", async () => {
+  const ready = status === "ready";
+  const qr = ready ? "" : status;
+  return {
+    content: [
+      {
+        type: "text",
+        text: JSON.stringify({
+          ready: status === "ready",
+          status: ready ? "ready" : qr ? "qr" : "loading",
+          qr: status !== "ready" ? status : undefined,
+        }),
       },
     ],
   };
