@@ -1,6 +1,6 @@
 # WhatsApp Web MCP Server
 
-This project is an MCP (Model Context Protocol) server for WhatsApp Web. It provides a set of tools to interact with WhatsApp Web programmatically, enabling features like sending messages, managing chats, and handling contacts.
+MCP server for WhatsApp Web. It provides a set of tools to interact with WhatsApp Web programmatically, enabling features like sending messages, managing chats, and handling contacts.
 
 ## Features
 
@@ -11,12 +11,14 @@ This project is an MCP (Model Context Protocol) server for WhatsApp Web. It prov
 
 ## Usage
 
+`git clone https://github.com/nivandres/whatsapp-web-mcp.git`
+
 ```json
 {
   "mcpServers": {
     "whatsapp": {
-      "command": "npx",
-      "args": ["-y", "whatsapp-web-mcp", "server", "<data_path>"]
+      "command": "bun",
+      "args": ["run", "index.ts"]
     }
   }
 }

@@ -1,7 +1,7 @@
 {
   "name": "whatsapp-web-mcp",
   "description": "A MCP server for WhatsApp Web",
-  "version": "1.1.0",
+  "version": "1.1.1",
   "module": "index.ts",
   "type": "module",
   "scripts": {
