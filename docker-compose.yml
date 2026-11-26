@@ -1,0 +1,18 @@
+# Streamable HTTP at http://localhost:3000/mcp; the QR is in the logs and at the link page they print.
+services:
+  whatsapp:
+    build:
+      context: .
+      args:
+        WWEBJS: ${WWEBJS:-github:pedroslopez/whatsapp-web.js#38eb45b2759450cc6fccb6a7a3f2cbc3bdb87db2}
+    restart: unless-stopped
+    hostname: whatsapp-mcp
+    ports:
+      - "127.0.0.1:3000:3000"
+    environment:
+      AUTH_TOKEN: ${AUTH_TOKEN:?set AUTH_TOKEN to at least 16 characters}
+    volumes:
+      - session:/data
+
+volumes:
+  session:

@@ -1,21 +1,30 @@
-ARG BUN_VERSION=latest
-ARG PORT=3000
-FROM oven/bun:${BUN_VERSION} AS base
+# The whatsapp-web.js to run: a version, or a commit on GitHub such as pedroslopez's main.
+ARG WWEBJS=github:pedroslopez/whatsapp-web.js#38eb45b2759450cc6fccb6a7a3f2cbc3bdb87db2
 
-RUN apt-get update -qq && \
-    apt-get install -y gconf-service libgbm-dev libasound2 libatk1.0-0 libc6 libcairo2 libcups2 libdbus-1-3 libexpat1 libfontconfig1 libgcc1 libgconf-2-4 libgdk-pixbuf2.0-0 libglib2.0-0 libgtk-3-0 libnspr4 libpango-1.0-0 libpangocairo-1.0-0 libstdc++6 libx11-6 libx11-xcb1 libxcb1 libxcomposite1 libxcursor1 libxdamage1 libxext6 libxfixes3 libxi6 libxrandr2 libxrender1 libxss1 libxtst6 ca-certificates fonts-liberation libappindicator1 libnss3 lsb-release xdg-utils && \
-    apt-get clean && rm -rf /var/lib/apt/lists/*
-
+FROM oven/bun:1.4 AS deps
+ARG WWEBJS
 WORKDIR /app
+ENV PUPPETEER_SKIP_DOWNLOAD=1
+COPY package.json bun.lock ./
+RUN bun install --frozen-lockfile --production \
+    && bun add --production --no-save "whatsapp-web.js@${WWEBJS}"
 
-FROM base AS build
-
-COPY . .
-RUN rm -rf node_modules && \
-    bun install --ci
-
-FROM base
-
-COPY --from=build /app /app
-
-ENTRYPOINT ["bun", "run", "index.ts"]
+FROM oven/bun:1.4-slim
+RUN apt-get update && apt-get install -y --no-install-recommends chromium fonts-noto-color-emoji \
+    && rm -rf /var/lib/apt/lists/*
+WORKDIR /app
+COPY --from=deps /app/node_modules node_modules
+COPY package.json ./
+COPY src src
+RUN mkdir -p /data && chown bun:bun /data
+ENV NODE_ENV=production \
+    DATA_DIR=/data \
+    HOST=0.0.0.0 \
+    PORT=3000 \
+    PUPPETEER_EXECUTABLE_PATH=/usr/bin/chromium \
+    CHROMIUM_ARGS=--no-sandbox
+USER bun
+VOLUME /data
+EXPOSE 3000
+ENTRYPOINT ["bun", "src/index.ts"]
+CMD ["http"]
