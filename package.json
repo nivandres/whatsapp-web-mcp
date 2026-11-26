@@ -1,27 +1,69 @@
 {
   "name": "whatsapp-web-mcp",
-  "description": "A MCP server for WhatsApp Web",
-  "version": "1.1.1",
-  "module": "index.ts",
+  "version": "2.0.0",
+  "description": "MCP server for WhatsApp, backed by whatsapp-web.js: link a device from the agent and drive chats, messages, groups and more",
+  "author": "nivandres",
+  "license": "MIT",
   "type": "module",
-  "scripts": {
-    "start": "node ./dist/index.js",
-    "build": "tsc"
-  },
   "bin": {
-    "mcp-server": "./dist/index.js"
+    "whatsapp-web-mcp": "./dist/index.js"
   },
-  "devDependencies": {
-    "@types/bun": "latest",
-    "@types/qrcode-terminal": "^0.12.2"
+  "repository": {
+    "type": "git",
+    "url": "git+https://github.com/nivandres/whatsapp-web-mcp.git"
   },
-  "peerDependencies": {
-    "typescript": "^5"
+  "bugs": {
+    "url": "https://github.com/nivandres/whatsapp-web-mcp/issues"
+  },
+  "homepage": "https://github.com/nivandres/whatsapp-web-mcp#readme",
+  "files": [
+    "dist",
+    "CHANGELOG.md"
+  ],
+  "engines": {
+    "node": ">=20"
+  },
+  "scripts": {
+    "build": "tsup",
+    "dev": "tsup --watch",
+    "start": "node dist/index.js",
+    "test": "vitest run --coverage",
+    "test:watch": "vitest",
+    "typecheck": "tsc --noEmit",
+    "lint": "oxlint",
+    "format": "prettier --write .",
+    "format:check": "prettier --check .",
+    "check": "bun run typecheck && bun run lint && bun run format:check && bun run test",
+    "clean": "rm -rf dist",
+    "prepublishOnly": "bun run clean && bun run check && bun run build"
   },
   "dependencies": {
-    "@modelcontextprotocol/sdk": "^1.12.0",
-    "qrcode-terminal": "^0.12.0",
-    "whatsapp-web.js": "^1.28.0",
-    "zod": "^3"
-  }
+    "@modelcontextprotocol/sdk": "^1.32.2",
+    "qrcode": "^1.5.4",
+    "zod": "^4.6.7"
+  },
+  "peerDependencies": {
+    "whatsapp-web.js": "^1.34.8"
+  },
+  "devDependencies": {
+    "@types/node": "^22.0.0",
+    "@types/qrcode": "^1.5.6",
+    "@vitest/coverage-v8": "^5.1.2",
+    "oxlint": "^1.95.0",
+    "prettier": "^3.10.1",
+    "tsup": "^9.0.0",
+    "typescript": "^7.0.2",
+    "vitest": "^5.1.2",
+    "whatsapp-web.js": "github:pedroslopez/whatsapp-web.js#38eb45b2759450cc6fccb6a7a3f2cbc3bdb87db2"
+  },
+  "publishConfig": {
+    "access": "public"
+  },
+  "keywords": [
+    "mcp",
+    "model-context-protocol",
+    "whatsapp",
+    "whatsapp-web.js",
+    "wwebjs"
+  ]
 }

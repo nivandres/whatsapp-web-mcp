@@ -1,6 +1,5 @@
 node_modules
-.wwebjs_cache
-.wwebjs_auth
-data
-*lock*
 dist
+coverage
+.wwebjs_auth
+.wwebjs_cache
