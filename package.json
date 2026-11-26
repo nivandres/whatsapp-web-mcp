@@ -6,7 +6,7 @@
   "license": "MIT",
   "type": "module",
   "bin": {
-    "whatsapp-web-mcp": "./dist/index.js"
+    "whatsapp-web-mcp": "dist/index.js"
   },
   "repository": {
     "type": "git",
